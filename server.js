@@ -61,6 +61,7 @@ const DEFAULTS = {
   maxMessage: 1 << 20,          // 1 MiB
   ratePerSec: 200,              // messages a second per connection
   roomsPerMinute: 10,           // rooms opened per IP
+  missesPerMinute: 20,          // wrong rooms tried per IP (a room is the coach's only key)
   maxConnections: 500,
   idleMs: 10 * 60 * 1000,       // a room with no messages for this long ends
   capMs: 4 * 60 * 60 * 1000,    // and every room ends after this
@@ -73,6 +74,7 @@ function createRelay(options = {}) {
   const o = { ...DEFAULTS, ...options };
   const rooms = new Map();          // "game/CODE" -> room
   const opened = new Map();         // ip -> [times rooms were opened]
+  const missed = new Map();         // ip -> [times a wrong room was tried]
   let connections = 0;
   const stats = { rooms: 0, joins: 0, messages: 0 };
 
@@ -88,11 +90,17 @@ function createRelay(options = {}) {
     }
     const page = url.pathname.match(/^\/c\/([A-Za-z]{4})\/?$/);
     if (page) {
+      const ip = ipOf(req);
+      if (tooManyMisses(ip)) {
+        res.writeHead(429, { "content-type": "text/plain", "retry-after": "60" });
+        return res.end("TOO MANY TRIES");
+      }
       const room = rooms.get("pb94-vr-coach/" + page[1].toUpperCase());
       if (room && room.page) {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
         return res.end(room.page);
       }
+      miss(ip);
       res.writeHead(404, { "content-type": "text/plain" });
       return res.end("NO SUCH ROOM");
     }
@@ -116,6 +124,22 @@ function createRelay(options = {}) {
   function ipOf(req) {
     const fwd = req.headers["x-forwarded-for"];
     return (fwd ? String(fwd).split(",")[0] : req.socket.remoteAddress || "").trim();
+  }
+
+  // The room is all a coach needs, so wrong rooms are counted per address:
+  // past missesPerMinute, that address waits a minute (20 a minute from one
+  // address would take days to find one room among 160,000).
+  function recent(map, ip) {
+    const now = Date.now();
+    return (map.get(ip) || []).filter((t) => now - t < 60 * 1000);
+  }
+  function tooManyMisses(ip) {
+    return recent(missed, ip).length >= o.missesPerMinute;
+  }
+  function miss(ip) {
+    const times = recent(missed, ip);
+    times.push(Date.now());
+    missed.set(ip, times);
   }
 
   function send(ws, msg) {
@@ -149,7 +173,7 @@ function createRelay(options = {}) {
     if (connections > o.maxConnections) return refuse(ws, "SERVER FULL");
     if (!(game in GAMES)) return refuse(ws, "NO SUCH GAME");
     if (role === "host") return openRoom(ws, game, ver, ip);
-    joinRoom(ws, game, (url.searchParams.get("code") || "").toUpperCase(), ver);
+    joinRoom(ws, game, (url.searchParams.get("code") || "").toUpperCase(), ver, ip);
   }
 
   function openRoom(ws, game, ver, ip) {
@@ -194,9 +218,13 @@ function createRelay(options = {}) {
     }
   }
 
-  function joinRoom(ws, game, code, ver) {
+  function joinRoom(ws, game, code, ver, ip) {
+    if (tooManyMisses(ip)) return refuse(ws, "TOO MANY TRIES");
     const room = rooms.get(game + "/" + code);
-    if (!room) return refuse(ws, "NO SUCH ROOM");
+    if (!room) {
+      miss(ip);
+      return refuse(ws, "NO SUCH ROOM");
+    }
     const you = room.guests.indexOf(null);
     if (you < 0) return refuse(ws, "ROOM FULL");
     room.guests[you] = ws;
@@ -260,7 +288,9 @@ function createRelay(options = {}) {
       if (now - room.last > o.idleMs) closeRoom(room, "IDLE");
       else if (now - room.born > o.capMs) closeRoom(room, "TIME UP");
     }
-    for (const [ip, times] of opened) if (times.every((t) => now - t > 60 * 1000)) opened.delete(ip);
+    for (const map of [opened, missed]) {
+      for (const [ip, times] of map) if (times.every((t) => now - t > 60 * 1000)) map.delete(ip);
+    }
   }, o.sweepMs);
 
   return {

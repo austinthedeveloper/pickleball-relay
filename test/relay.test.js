@@ -43,13 +43,13 @@ async function host(url, game = "pb94-port", ver = "1.0.0", headers) {
   return { h, code: msg.code };
 }
 
-async function join(url, code, game = "pb94-port", ver = "1.0.0") {
-  const g = client(`${url}/v1/join?game=${game}&code=${code}&ver=${ver}`);
+async function join(url, code, game = "pb94-port", ver = "1.0.0", headers) {
+  const g = client(`${url}/v1/join?game=${game}&code=${code}&ver=${ver}`, headers);
   return { g, msg: await g.next() };
 }
 
-function get(port, path) {
-  return fetch(`http://127.0.0.1:${port}${path}`).then(async (r) => ({ status: r.status, body: await r.text() }));
+function get(port, path, headers = {}) {
+  return fetch(`http://127.0.0.1:${port}${path}`, { headers }).then(async (r) => ({ status: r.status, body: await r.text() }));
 }
 
 test("healthz says ok, and the front door asks for a room", async (t) => {
@@ -164,6 +164,22 @@ test("an address can open only so many rooms a minute", async (t) => {
   assert.deepEqual(await fourth.next(), { op: "error", reason: "TOO MANY ROOMS" });
   hosts.push((await host(url, "pb94-port", "1", { "x-forwarded-for": "198.51.100.7" })).h);
   hosts.forEach((h) => h.close());
+});
+
+test("an address that tries too many wrong rooms waits", async (t) => {
+  const { url, port } = await start(t, { missesPerMinute: 3 });
+  const { h, code } = await host(url, "pb94-vr-coach");
+  h.send(JSON.stringify({ op: "page", html: "<p>COACH</p>" }));
+  const me = { "x-forwarded-for": "203.0.113.9" };
+  assert.equal((await get(port, "/c/ZZZZ", me)).status, 404);
+  assert.equal((await join(url, "ZZZZ", "pb94-vr-coach", "1", me)).msg.reason, "NO SUCH ROOM");
+  assert.equal((await get(port, "/c/ZZZX", me)).status, 404);
+  // Three misses: now even the right room waits, by page or by socket.
+  assert.deepEqual(await get(port, `/c/${code}`, me), { status: 429, body: "TOO MANY TRIES" });
+  assert.equal((await join(url, code, "pb94-vr-coach", "1", me)).msg.reason, "TOO MANY TRIES");
+  // Another address is fine.
+  assert.equal((await get(port, `/c/${code}`, { "x-forwarded-for": "198.51.100.7" })).status, 200);
+  h.close();
 });
 
 test("the relay holds only so many connections", async (t) => {

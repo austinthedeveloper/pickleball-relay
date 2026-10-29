@@ -42,7 +42,9 @@ GET https://<relay>/                             -> a box for the room code, the
 | `pb94-vr` (VR online, later) | 3 |
 
 **Limits:** 1 MiB a message, 200 messages a second per connection, 10
-rooms a minute per address, 500 connections. A room ends when its host
+rooms a minute per address, 20 wrong rooms a minute per address (pages
+and joins; past it, `TOO MANY TRIES` for a minute, since a VR coach room
+needs nothing else), 500 connections. A room ends when its host
 leaves, after 10 minutes with no messages, or after 4 hours. A ping every
 15 s keeps connections alive through Azure's ingress.
 
