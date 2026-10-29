@@ -6,6 +6,7 @@
 //   wss://<relay>/v1/join?game=pb94-port&code=BXKM   -> {"op":"welcome","you":0,"ver":...}
 //   GET /healthz                                     -> 200 "ok"
 //   GET /c/BXKM                                      -> the page that room's host sent
+//   GET /                                            -> a box for the room code, to /c/<code>
 //
 // Binary frames carry the games' messages. The host's have a one-byte
 // header both ways: the guest's number, or 255 for "all" (host to guests).
@@ -20,6 +21,34 @@ const { WebSocketServer } = require("ws");
 const ALPHABET = "BCDFGHJKLMNPQRSTVWXZ";
 const CODE_LEN = 4;
 const ALL = 255;
+
+// The front door: a coach types the room the headset shows and goes to its page.
+const FRONT = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pickleball '94 Coach</title>
+<style>
+  body { margin: 0; background: #0b1020; color: #e8ecf8; font: 16px/1.4 -apple-system, system-ui, sans-serif;
+         display: grid; place-items: center; min-height: 100vh; padding: 0 16px; box-sizing: border-box; }
+  main { width: 100%; max-width: 360px; text-align: center; }
+  h1 { color: #f2c230; font-size: 20px; letter-spacing: .04em; }
+  input { width: 100%; box-sizing: border-box; font-size: 32px; text-align: center; letter-spacing: .3em;
+          text-transform: uppercase; padding: 10px; border-radius: 10px; border: 2px solid #2a355a;
+          background: #141b31; color: #e8ecf8; }
+  button { width: 100%; margin-top: 12px; font-size: 18px; font-weight: 700; padding: 14px; border: 0;
+           border-radius: 10px; background: #3ddc84; color: #0b1020; }
+  p { color: #8e9ac0; }
+</style></head><body><main>
+<h1>PICKLEBALL '94 COACH</h1>
+<p>Enter the room shown on the headset's COACH page.</p>
+<form onsubmit="go(); return false"><input id="room" maxlength="4" autocomplete="off" autocapitalize="characters" placeholder="ROOM">
+<button>OPEN</button></form>
+<script>
+function go() {
+  const r = document.getElementById("room").value.trim().toUpperCase();
+  if (/^[A-Z]{4}$/.test(r)) location.href = "/c/" + r;
+}
+</script></main></body></html>`;
 
 const GAMES = {
   "pb94-port": 1,       // ONLINE: one guest
@@ -53,9 +82,13 @@ function createRelay(options = {}) {
       res.writeHead(200, { "content-type": "text/plain" });
       return res.end("ok");
     }
-    const page = url.pathname.match(/^\/c\/([A-Z]{4})$/);
+    if (url.pathname === "/") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      return res.end(FRONT);
+    }
+    const page = url.pathname.match(/^\/c\/([A-Za-z]{4})\/?$/);
     if (page) {
-      const room = rooms.get("pb94-vr-coach/" + page[1]);
+      const room = rooms.get("pb94-vr-coach/" + page[1].toUpperCase());
       if (room && room.page) {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
         return res.end(room.page);
@@ -64,7 +97,7 @@ function createRelay(options = {}) {
       return res.end("NO SUCH ROOM");
     }
     res.writeHead(404, { "content-type": "text/plain" });
-    res.end("pickleball relay");
+    res.end("not found");
   });
 
   const wss = new WebSocketServer({ noServer: true, maxPayload: o.maxMessage });

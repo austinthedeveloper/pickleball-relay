@@ -17,6 +17,7 @@ wss://<relay>/v1/join?game=pb94-port&code=BXKM   -> {"op":"welcome","you":0,"ver
 the host then gets {"op":"joined","guest":0,"ver":...} and {"op":"left","guest":0}
 GET https://<relay>/healthz                      -> 200 "ok"
 GET https://<relay>/c/BXKM                       -> the page a pb94-vr-coach host sent
+GET https://<relay>/                             -> a box for the room code, then /c/<room>
 ```
 
 - **Binary frames are the games' messages**, in order, nothing lost.

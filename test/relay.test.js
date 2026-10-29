@@ -52,9 +52,12 @@ function get(port, path) {
   return fetch(`http://127.0.0.1:${port}${path}`).then(async (r) => ({ status: r.status, body: await r.text() }));
 }
 
-test("healthz says ok", async (t) => {
+test("healthz says ok, and the front door asks for a room", async (t) => {
   const { port } = await start(t);
   assert.deepEqual(await get(port, "/healthz"), { status: 200, body: "ok" });
+  const front = await get(port, "/");
+  assert.equal(front.status, 200);
+  assert.match(front.body, /Enter the room/);
 });
 
 test("a host gets a four-letter code from the alphabet", async (t) => {
@@ -184,6 +187,7 @@ test("a VR coach room serves the page its headset sent", async (t) => {
   h.send(JSON.stringify({ op: "page", html: "<p>COACH</p>" }));
   await new Promise((r) => setTimeout(r, 50));
   assert.deepEqual(await get(port, `/c/${code}`), { status: 200, body: "<p>COACH</p>" });
+  assert.equal((await get(port, `/c/${code.toLowerCase()}`)).status, 200, "any case");
   // Other games' rooms can't serve pages.
   const port_ = await host(url, "pb94-port");
   port_.h.send(JSON.stringify({ op: "page", html: "x" }));
