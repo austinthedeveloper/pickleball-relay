@@ -1,0 +1,87 @@
+# Tests on every push and pull request. On main: the image to ghcr.io, then
+# Azure (once infra/setup.sh has set the repo's AZURE_* variables).
+name: test and deploy
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  image:
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.sha }},${{ env.IMAGE }}:latest
+
+  deploy:
+    needs: image
+    if: vars.AZURE_CLIENT_ID != ''
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      # Azure pulls the image without signing in, so the package must be public.
+      - name: the image is public
+        run: |
+          token=$(curl -fsS "https://ghcr.io/token?scope=repository:${GITHUB_REPOSITORY}:pull" | jq -r .token)
+          if ! curl -fsS -o /dev/null -H "Authorization: Bearer $token" \
+               -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.v2+json" \
+               "https://ghcr.io/v2/${GITHUB_REPOSITORY}/manifests/${GITHUB_SHA}"; then
+            echo "::error::The image is private. Make it public: https://github.com/users/${GITHUB_REPOSITORY_OWNER}/packages/container/${GITHUB_REPOSITORY#*/}/settings (Danger Zone > Change visibility), then re-run."
+            exit 1
+          fi
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: deploy
+        run: |
+          url=$(az deployment group create --resource-group pickleball-relay --name relay \
+            --template-file infra/main.bicep --parameters image=${IMAGE}:${GITHUB_SHA} \
+            --query properties.outputs.url.value -o tsv)
+          echo "RELAY_URL=$url" >> "$GITHUB_ENV"
+          echo "### Relay: $url" >> "$GITHUB_STEP_SUMMARY"
+      - name: healthz
+        run: |
+          for i in $(seq 1 12); do
+            if [ "$(curl -fsS --max-time 20 "$RELAY_URL/healthz")" = ok ]; then echo "ok"; exit 0; fi
+            sleep 10
+          done
+          echo "::error::$RELAY_URL/healthz never said ok"; exit 1

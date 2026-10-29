@@ -1,0 +1,18 @@
+{
+  "name": "pickleball-relay",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Rooms by code for Pickleball '94's games: a tiny WebSocket relay.",
+  "main": "server.js",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "ws": "8.22.0"
+  }
+}
