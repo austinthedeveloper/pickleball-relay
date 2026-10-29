@@ -35,11 +35,19 @@ SP_ID=$(az ad sp list --filter "appId eq '$APP_ID'" --query "[0].id" -o tsv)
 if [ -z "$SP_ID" ]; then
   SP_ID=$(az ad sp create --id "$APP_ID" --query id -o tsv)
 fi
-if [ -z "$(az ad app federated-credential list --id "$APP_ID" --query "[?name=='github-main'].name" -o tsv)" ]; then
+# GitHub's tokens name the owner and repo with their IDs as well
+# (repo:owner@id/name@id:...), so a renamed or re-created repo can't sign in.
+SUBJECT=$(gh api "repos/$REPO" --jq '"repo:\(.owner.login)@\(.owner.id)/\(.name)@\(.id):ref:refs/heads/main"')
+HAVE=$(az ad app federated-credential list --id "$APP_ID" --query "[?name=='github-main'].subject" -o tsv)
+if [ -n "$HAVE" ] && [ "$HAVE" != "$SUBJECT" ]; then
+  az ad app federated-credential delete --id "$APP_ID" --federated-credential-id github-main
+  HAVE=""
+fi
+if [ -z "$HAVE" ]; then
   az ad app federated-credential create --id "$APP_ID" -o none --parameters "{
     \"name\": \"github-main\",
     \"issuer\": \"https://token.actions.githubusercontent.com\",
-    \"subject\": \"repo:$REPO:ref:refs/heads/main\",
+    \"subject\": \"$SUBJECT\",
     \"audiences\": [\"api://AzureADTokenExchange\"]
   }"
 fi
