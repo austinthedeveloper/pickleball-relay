@@ -1,11 +1,11 @@
 # pickleball-relay
 
-Rooms by code for Pickleball '94's games: a tiny WebSocket relay on Azure
+Rooms by code for Pickleball '94's games (and Sundown Run's): a tiny WebSocket relay on Azure
 Container Apps. Both sides dial out to it and meet in a room by a
 four-letter code, so nobody forwards ports, and a browser can play too.
 The plan and its reasons are in the port kit's `design/RELAY.md`.
 
-It knows nothing of pickleball. It pairs connections in rooms and passes
+It knows nothing of pickleball or racing. It pairs connections in rooms and passes
 their messages on. Nothing is stored, there are no accounts, and the logs
 keep counts, never payloads.
 
@@ -40,6 +40,7 @@ GET https://<relay>/                             -> a box for the room code, the
 | `pb94-port` (the port's ONLINE) | 1 |
 | `pb94-vr-coach` (coach phones) | 8 |
 | `pb94-vr` (VR online, later) | 3 |
+| `sundown-run` (the arcade racer's online races) | 3 |
 
 **Limits:** 1 MiB a message, 200 messages a second per connection, 10
 rooms a minute per address, 20 wrong rooms a minute per address (pages
