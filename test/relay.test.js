@@ -97,6 +97,26 @@ test("the host reaches one guest or all of them", async (t) => {
   h.close();
 });
 
+test("a Sundown Run room holds four players, and the host hears each guest apart", async (t) => {
+  const { url } = await start(t);
+  const { h, code } = await host(url, "sundown-run", "0.2.0");
+  const guests = [];
+  for (let i = 0; i < 3; i++) {
+    const j = await join(url, code, "sundown-run", "0.2.0");
+    assert.deepEqual(j.msg, { op: "welcome", you: i, ver: "0.2.0" });
+    assert.deepEqual(await h.next(), { op: "joined", guest: i, ver: "0.2.0" });
+    guests.push(j.g);
+  }
+  assert.deepEqual((await join(url, code, "sundown-run")).msg, { op: "error", reason: "ROOM FULL" });
+  guests[2].send(Buffer.from([9]));
+  assert.deepEqual(await h.next(), Buffer.from([2, 9]));
+  h.send(Buffer.from([ALL, 5]));
+  for (const g of guests) assert.deepEqual(await g.next(), Buffer.from([5]));
+  // A racer's code is no port's
+  assert.deepEqual((await join(url, code)).msg, { op: "error", reason: "NO SUCH ROOM" });
+  h.close();
+});
+
 test("a full room, a wrong code and a wrong game are refused", async (t) => {
   const { url } = await start(t);
   const { h, code } = await host(url);

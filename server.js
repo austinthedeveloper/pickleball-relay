@@ -1,4 +1,4 @@
-// The relay: rooms by code for Pickleball '94's games (port ADR-105,
+// The relay: rooms by code for Pickleball '94's games and Sundown Run (port ADR-105,
 // pickleball-port-kit design/RELAY.md). It knows nothing of pickleball: it
 // pairs WebSocket connections in rooms and passes their messages on.
 //
@@ -54,6 +54,7 @@ const GAMES = {
   "pb94-port": 1,       // ONLINE: one guest
   "pb94-vr-coach": 8,   // coach phones
   "pb94-vr": 3,         // future VR online
+  "sundown-run": 3,     // Sundown Run's online races: four players (arcade-racer ON-1)
 };
 
 const DEFAULTS = {
