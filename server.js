@@ -7,6 +7,7 @@
 //   GET /healthz                                     -> 200 "ok"
 //   GET /c/BXKM                                      -> the page that room's host sent
 //   GET /                                            -> a box for the room code, to /c/<code>
+//   GET|POST /v1/board?game=pb94-port&board=trip-YYYYMMDD -> a day's or a week's scores (boards.js)
 //
 // Binary frames carry the games' messages. The host's have a one-byte
 // header both ways: the guest's number, or 255 for "all" (host to guests).
@@ -16,6 +17,7 @@
 
 const http = require("http");
 const { WebSocketServer } = require("ws");
+const { createBoards } = require("./boards");
 
 // Four letters, consonants only: no I or O to misread, and no vowels, so no words.
 const ALPHABET = "BCDFGHJKLMNPQRSTVWXZ";
@@ -69,6 +71,7 @@ const DEFAULTS = {
   pingMs: 15 * 1000,
   sweepMs: 30 * 1000,
   log: console.log,
+  boardFile: process.env.BOARD_FILE || "",   // boards kept across sleeps, if set
 };
 
 function createRelay(options = {}) {
@@ -77,7 +80,40 @@ function createRelay(options = {}) {
   const opened = new Map();         // ip -> [times rooms were opened]
   const missed = new Map();         // ip -> [times a wrong room was tried]
   let connections = 0;
-  const stats = { rooms: 0, joins: 0, messages: 0 };
+  const stats = { rooms: 0, joins: 0, messages: 0, scores: 0 };
+  const boards = createBoards({ file: o.boardFile });
+
+  // The boards (boards.js), for any page: the Web build calls from its own origin.
+  function boardRequest(req, res, url) {
+    const cors = { "access-control-allow-origin": "*", "access-control-allow-methods": "GET, POST, OPTIONS",
+                   "access-control-allow-headers": "content-type", "cache-control": "no-store" };
+    const reply = (code, body) => {
+      res.writeHead(code, { "content-type": "application/json", ...cors });
+      res.end(JSON.stringify(body));
+    };
+    if (req.method === "OPTIONS") {
+      res.writeHead(204, cors);
+      return res.end();
+    }
+    const game = url.searchParams.get("game") || "";
+    const name = url.searchParams.get("board") || "";
+    if (!(game in GAMES)) return reply(404, { error: "NO SUCH GAME" });
+    if (req.method === "GET") return reply(200, boards.get(game, name));
+    if (req.method !== "POST") return reply(405, { error: "GET OR POST" });
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk;
+      if (body.length > 1024) req.destroy();
+    });
+    req.on("end", () => {
+      let entry;
+      try { entry = JSON.parse(body); } catch { return reply(400, { error: "BAD ENTRY" }); }
+      const out = boards.post(game, name, entry, ipOf(req));
+      if (out.error) return reply(out.error === "TOO MANY TRIES" ? 429 : 400, out);
+      stats.scores++;
+      reply(200, out);
+    });
+  }
 
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, "http://relay");
@@ -89,6 +125,7 @@ function createRelay(options = {}) {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       return res.end(FRONT);
     }
+    if (url.pathname === "/v1/board") return boardRequest(req, res, url);
     const page = url.pathname.match(/^\/c\/([A-Za-z]{4})\/?$/);
     if (page) {
       const ip = ipOf(req);
@@ -289,6 +326,7 @@ function createRelay(options = {}) {
       if (now - room.last > o.idleMs) closeRoom(room, "IDLE");
       else if (now - room.born > o.capMs) closeRoom(room, "TIME UP");
     }
+    boards.sweep();
     for (const map of [opened, missed]) {
       for (const [ip, times] of map) if (times.every((t) => now - t > 60 * 1000)) map.delete(ip);
     }
@@ -298,6 +336,7 @@ function createRelay(options = {}) {
     server,
     rooms,
     stats,
+    boards,
     listen(port = o.port) {
       return new Promise((resolve) => server.listen(port, () => resolve(server.address().port)));
     },

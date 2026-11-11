@@ -232,3 +232,91 @@ test("a VR coach room serves the page its headset sent", async (t) => {
   h.close();
   port_.h.close();
 });
+
+// --- Boards (port kit PORT-158/159) ------------------------------------------------
+
+const { current, isoWeek } = require("../boards");
+
+async function board(port, name, method = "GET", body, headers = {}) {
+  const res = await fetch(`http://127.0.0.1:${port}/v1/board?game=pb94-port&board=${name}`, {
+    method, headers: { "content-type": "application/json", ...headers }, body: body && JSON.stringify(body),
+  });
+  return { status: res.status, body: res.status === 204 ? null : await res.json(), headers: res.headers };
+}
+
+function today(offset = 0) {
+  const d = new Date(Date.now() + offset * 86400000);
+  return `trip-${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, "0")}${String(d.getUTCDate()).padStart(2, "0")}`;
+}
+
+test("a day's board takes scores, best first, one per address and initials", async (t) => {
+  const { port } = await start(t);
+  const name = today();
+  assert.deepEqual((await board(port, name)).body, { board: [], count: 0 });
+  let r = await board(port, name, "POST", { initials: "ACE", score: 500, detail: "LEG 3" });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.rank, 1);
+  r = await board(port, name, "POST", { initials: "BOB", score: 900, detail: "WON" }, { "x-forwarded-for": "10.0.0.2" });
+  assert.equal(r.body.rank, 1);
+  r = await board(port, name, "POST", { initials: "ACE", score: 400 });
+  assert.equal(r.body.kept, false, "a worse score doesn't replace a better");
+  r = await board(port, name, "POST", { initials: "ACE", score: 1000, detail: "WON 9-1" });
+  assert.equal(r.body.rank, 1, "a better one does");
+  const b = (await board(port, name)).body;
+  assert.equal(b.count, 2);
+  assert.deepEqual(b.board.map((e) => e.initials), ["ACE", "BOB"]);
+  assert.equal(b.board[0].detail, "WON 9-1");
+  assert.equal(b.board[0].ip, undefined, "addresses never leave the relay");
+});
+
+test("a board refuses what it shouldn't keep", async (t) => {
+  const { port } = await start(t);
+  for (const [entry, why] of [[{ initials: "ab", score: 1 }, "BAD INITIALS"], [{ initials: "ASS", score: 1 }, "BAD INITIALS"],
+    [{ initials: "ACE", score: -1 }, "BAD SCORE"], [{ initials: "ACE", score: 1.5 }, "BAD SCORE"],
+    [{ initials: "ACE", score: 1, detail: "lower case" }, "BAD DETAIL"]]) {
+    const r = await board(port, today(), "POST", entry, { "x-forwarded-for": "10.9.9." + why.length });
+    assert.equal(r.status, 400);
+    assert.equal(r.body.error, why);
+  }
+  const old = await board(port, today(-5), "POST", { initials: "ACE", score: 1 });
+  assert.equal(old.body.error, "NOT TODAY");
+  const odd = await board(port, "trip-x", "POST", { initials: "ACE", score: 1 });
+  assert.equal(odd.body.error, "NOT TODAY");
+  const game = await fetch(`http://127.0.0.1:${port}/v1/board?game=nope&board=${today()}`);
+  assert.equal(game.status, 404);
+});
+
+test("an address can post only so many scores a minute", async (t) => {
+  const { port } = await start(t);
+  let last;
+  for (let i = 0; i < 7; i++) last = await board(port, today(), "POST", { initials: "ACE", score: i });
+  assert.equal(last.status, 429);
+});
+
+test("boards answer any page (CORS), preflight too", async (t) => {
+  const { port } = await start(t);
+  const pre = await board(port, today(), "OPTIONS");
+  assert.equal(pre.status, 204);
+  assert.equal(pre.headers.get("access-control-allow-origin"), "*");
+  assert.match(pre.headers.get("access-control-allow-methods"), /POST/);
+});
+
+test("weeks: this one and the last are taken", () => {
+  const now = new Date(Date.UTC(2026, 10, 11));         // a Wednesday
+  assert.deepEqual(isoWeek(now), [2026, 46]);
+  assert.deepEqual(isoWeek(new Date(Date.UTC(2027, 0, 1))), [2026, 53]);
+  assert.ok(current("week-202646", now));
+  assert.ok(current("week-202645", now));
+  assert.ok(!current("week-202644", now));
+  assert.ok(current("trip-20261110", now) && current("trip-20261112", now) && !current("trip-20261113", now));
+});
+
+test("BOARD_FILE keeps boards across a restart", async (t) => {
+  const file = require("path").join(require("os").tmpdir(), `boards-${process.pid}.json`);
+  t.after(() => require("fs").rmSync(file, { force: true }));
+  const first = await start(t, { boardFile: file });
+  await board(first.port, today(), "POST", { initials: "ACE", score: 77 });
+  await new Promise((r) => setTimeout(r, 1300));
+  const second = await start(t, { boardFile: file });
+  assert.equal((await board(second.port, today())).body.board[0].score, 77);
+});

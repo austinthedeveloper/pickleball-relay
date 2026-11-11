@@ -6,8 +6,8 @@ four-letter code, so nobody forwards ports, and a browser can play too.
 The plan and its reasons are in the port kit's `design/RELAY.md`.
 
 It knows nothing of pickleball or racing. It pairs connections in rooms and passes
-their messages on. Nothing is stored, there are no accounts, and the logs
-keep counts, never payloads.
+their messages on. Nothing is stored but the score boards (three letters and a number,
+below), there are no accounts, and the logs keep counts, never payloads.
 
 ## The protocol (v1)
 
@@ -34,6 +34,27 @@ GET https://<relay>/                             -> a box for the room code, the
 - **Codes** are four consonants from `BCDFGHJKLMNPQRSTVWXZ` (no I or O to
   misread, no vowels so no words), 160,000 of them, and each game has its
   own: a VR code never finds a port room.
+
+## Boards (the port's PORT-158 and 159)
+
+```
+GET  https://<relay>/v1/board?game=pb94-port&board=trip-20261111   -> {"board":[...],"count":n}
+POST https://<relay>/v1/board?game=pb94-port&board=trip-20261111
+     {"initials":"ACE","score":1240,"detail":"WON 9-2"}            -> {"ok":true,"rank":3,"board":[...]}
+```
+
+- A board is a day's TODAY'S TRIP (`trip-YYYYMMDD`) or a week's challenge
+  (`week-YYYYWW`, the ISO week). Only boards within a day of today (time
+  zones), or this week and the last, take scores.
+- The top 20 show, one per address and initials (a better score replaces
+  a worse). Initials are three capitals, a short list of words refused;
+  6 posts a minute per address. Addresses never leave the relay.
+- The scores are the game's own claim: the relay can't replay a match, so
+  a board is for friends, not prizes.
+- **Boards live in memory**, so a sleeping relay (no replicas when idle)
+  forgets them. Set `BOARD_FILE` to a path on a mounted volume to keep
+  them; without it they last as long as the replica.
+- CORS is open (`*`) so the Web build can call it from its own page.
 
 | Game | Guests |
 |------|--------|
