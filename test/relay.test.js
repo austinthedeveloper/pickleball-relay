@@ -117,6 +117,29 @@ test("a Sundown Run room holds four players, and the host hears each guest apart
   h.close();
 });
 
+test("a port host sizes its room (doubles and watchers), up to the game's most", async (t) => {
+  const { url } = await start(t);
+  const h = client(`${url}/v1/host?game=pb94-port&ver=1.0.0&guests=7`);
+  const { code } = await h.next();
+  const guests = [];
+  for (let i = 0; i < 7; i++) guests.push(await join(url, code));
+  assert.ok(guests.every((g) => g.msg.op === "welcome"), "seven guests in");
+  assert.deepEqual((await join(url, code)).msg, { op: "error", reason: "ROOM FULL" });
+  const big = client(`${url}/v1/host?game=pb94-port&ver=1.0.0&guests=99`);
+  const room = (await big.next()).code;
+  for (let i = 0; i < 7; i++) await join(url, room);
+  assert.deepEqual((await join(url, room)).msg, { op: "error", reason: "ROOM FULL" }, "capped at the game's 7");
+  // the host of a big room may send for each of its guests: 4x the rate
+  const burst = [];
+  for (let i = 0; i < 500; i++) burst.push(Buffer.from([0, i & 0xff]));
+  for (const b of burst) h.send(b);
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(h.readyState, h.OPEN, "500 at once from a big room's host is allowed");
+  for (const g of guests) g.g.close();
+  h.close();
+  big.close();
+});
+
 test("versions compare by number, and OLDEST_VERSIONS reads as game=version pairs", () => {
   assert.equal(compareVersions("0.5.10", "0.5.9"), 1);
   assert.equal(compareVersions("0.5.2", "0.6.0"), -1);
