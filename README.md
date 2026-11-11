@@ -90,3 +90,13 @@ npm start         # on :8080 (PORT to change it)
 - `.github/workflows/deploy.yml`: tests on every push. On main it also
   builds the image to ghcr.io and deploys it, then checks `/healthz`.
   The image must be public, since Azure pulls it without signing in.
+
+## Replay codes
+
+`POST /v1/replay?game=pb94-port` with `{"data":"<base64>"}` keeps a shared
+rally for 7 days and answers with a six-letter code; `GET
+/v1/replay?game=pb94-port&code=XXXXXX` gives it back. Kept: the replay's
+bytes and when it came. Not kept: names, accounts or the sender's address
+(used for the rate limit, 20 shares an hour, and nothing else). 48 KB a
+replay, 5000 at most. `REPLAY_FILE` keeps them across restarts, as
+`BOARD_FILE` does the boards.
