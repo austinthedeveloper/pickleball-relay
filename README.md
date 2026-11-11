@@ -28,7 +28,13 @@ GET https://<relay>/                             -> a box for the room code, the
 - **Text frames are control messages**, JSON with an `op`.
   - `error` comes with a reason, then the relay closes the connection:
     NO SUCH GAME, NO SUCH ROOM, ROOM FULL, SERVER FULL, TOO MANY ROOMS,
-    TOO FAST, HOST LEFT, IDLE, TIME UP.
+    TOO FAST, HOST LEFT, IDLE, TIME UP, OLD VERSION.
+- **The oldest version a game takes** (arcade-racer ON-14) is set with
+  `OLDEST_VERSIONS`, e.g. `OLDEST_VERSIONS=sundown-run=0.6.0,pb94-port=0.43.0`.
+  A host or guest whose `ver` is older (by number: 0.5.10 is after 0.5.9)
+  gets `error` OLD VERSION, and that game's `room` and `welcome` carry
+  `"oldest":"0.6.0"`. A game not named takes every version (the default),
+  and a client that sends no `ver` is always let in.
   - A `pb94-vr-coach` host may send `{"op":"page","html":...}`; the relay
     then serves it at `/c/<code>` while the room is open.
 - **Codes** are four consonants from `BCDFGHJKLMNPQRSTVWXZ` (no I or O to

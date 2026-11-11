@@ -4,6 +4,8 @@
 //
 //   wss://<relay>/v1/host?game=pb94-port&ver=0.43.0  -> {"op":"room","code":"BXKM"}
 //   wss://<relay>/v1/join?game=pb94-port&code=BXKM   -> {"op":"welcome","you":0,"ver":...}
+//   (a game given an oldest version, OLDEST_VERSIONS, adds "oldest" to both, and an older
+//   ver is refused with {"op":"error","reason":"OLD VERSION"}; arcade-racer ON-14)
 //   GET /healthz                                     -> 200 "ok"
 //   GET /c/BXKM                                      -> the page that room's host sent
 //   GET /                                            -> a box for the room code, to /c/<code>
@@ -72,7 +74,33 @@ const DEFAULTS = {
   sweepMs: 30 * 1000,
   log: console.log,
   boardFile: process.env.BOARD_FILE || "",   // boards kept across sleeps, if set
+  // The oldest version each game takes, {game: "x.y.z"}; a game not named takes any. From
+  // OLDEST_VERSIONS="sundown-run=0.6.0,pb94-port=0.43.0". None by default: every build in.
+  oldest: parseOldest(process.env.OLDEST_VERSIONS || ""),
 };
+
+// "game=x.y.z,game2=x.y.z" -> {game: "x.y.z"}; pairs without both halves are skipped.
+function parseOldest(text) {
+  const out = {};
+  for (const pair of text.split(",")) {
+    const [game, ver] = pair.split("=").map((x) => (x || "").trim());
+    if (game && ver) out[game] = ver;
+  }
+  return out;
+}
+
+// Versions by number, part by part ("0.5.10" after "0.5.9"), as the games compare them
+// (arcade-racer BootTree.compare): a leading "v" dropped, a missing or non-number part 0.
+function compareVersions(a, b) {
+  const x = String(a).replace(/^v/, "").split(".");
+  const y = String(b).replace(/^v/, "").split(".");
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const p = parseInt(x[i], 10) || 0;
+    const q = parseInt(y[i], 10) || 0;
+    if (p !== q) return p > q ? 1 : -1;
+  }
+  return 0;
+}
 
 function createRelay(options = {}) {
   const o = { ...DEFAULTS, ...options };
@@ -189,6 +217,12 @@ function createRelay(options = {}) {
     ws.close(1008, reason);
   }
 
+  // The room and welcome name the oldest version taken, when the game has one.
+  function withOldest(msg, game) {
+    if (o.oldest[game]) msg.oldest = o.oldest[game];
+    return msg;
+  }
+
   function newCode(game) {
     for (let tries = 0; tries < 100; tries++) {
       let code = "";
@@ -210,6 +244,9 @@ function createRelay(options = {}) {
     const ver = (url.searchParams.get("ver") || "").slice(0, 32);
     if (connections > o.maxConnections) return refuse(ws, "SERVER FULL");
     if (!(game in GAMES)) return refuse(ws, "NO SUCH GAME");
+    // A game that sends no version is let in: only a version known to be old is refused.
+    const oldest = o.oldest[game] || "";
+    if (oldest && ver && compareVersions(ver, oldest) < 0) return refuse(ws, "OLD VERSION");
     if (role === "host") return openRoom(ws, game, ver, ip);
     joinRoom(ws, game, (url.searchParams.get("code") || "").toUpperCase(), ver, ip);
   }
@@ -227,7 +264,7 @@ function createRelay(options = {}) {
     rooms.set(room.key, room);
     stats.rooms++;
     o.log(`room open ${game} (rooms ${rooms.size}, connections ${connections})`);
-    send(ws, { op: "room", code });
+    send(ws, withOldest({ op: "room", code }, game));
 
     ws.on("message", (data, binary) => {
       if (!allowed(ws)) return;
@@ -268,7 +305,7 @@ function createRelay(options = {}) {
     room.guests[you] = ws;
     room.last = Date.now();
     stats.joins++;
-    send(ws, { op: "welcome", you, ver: room.ver });
+    send(ws, withOldest({ op: "welcome", you, ver: room.ver }, game));
     send(room.host, { op: "joined", guest: you, ver });
 
     ws.on("message", (data, binary) => {
@@ -349,7 +386,7 @@ function createRelay(options = {}) {
   };
 }
 
-module.exports = { createRelay, GAMES, ALPHABET, ALL };
+module.exports = { createRelay, compareVersions, parseOldest, GAMES, ALPHABET, ALL };
 
 if (require.main === module) {
   const relay = createRelay();
