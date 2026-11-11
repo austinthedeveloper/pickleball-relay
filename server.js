@@ -4,6 +4,8 @@
 //
 //   wss://<relay>/v1/host?game=pb94-port&ver=0.43.0  -> {"op":"room","code":"BXKM"}
 //   wss://<relay>/v1/join?game=pb94-port&code=BXKM   -> {"op":"welcome","you":0,"ver":...}
+//   (a game given an oldest version, OLDEST_VERSIONS, adds "oldest" to both, and an older
+//   ver is refused with {"op":"error","reason":"OLD VERSION"}; arcade-racer ON-14)
 //   GET /healthz                                     -> 200 "ok"
 //   GET /c/BXKM                                      -> the page that room's host sent
 //   GET /                                            -> a box for the room code, to /c/<code>
@@ -54,8 +56,11 @@ function go() {
 }
 </script></main></body></html>`;
 
+// A room's guests when the host doesn't say (?guests=n, up to the game's
+// most): the port's games before rooms of seats asked for none, so one.
+const ROOM_DEFAULT = { "pb94-port": 1 };
 const GAMES = {
-  "pb94-port": 1,       // ONLINE: one guest
+  "pb94-port": 7,       // ONLINE: up to 3 more seats and 4 watchers (the host asks, ?guests=)
   "pb94-vr-coach": 8,   // coach phones
   "pb94-vr": 3,         // future VR online
   "sundown-run": 3,     // Sundown Run's online races: four players (arcade-racer ON-1)
@@ -75,7 +80,33 @@ const DEFAULTS = {
   log: console.log,
   boardFile: process.env.BOARD_FILE || "",   // boards kept across sleeps, if set
   replayFile: process.env.REPLAY_FILE || "", // replay codes kept across sleeps, if set
+  // The oldest version each game takes, {game: "x.y.z"}; a game not named takes any. From
+  // OLDEST_VERSIONS="sundown-run=0.6.0,pb94-port=0.43.0". None by default: every build in.
+  oldest: parseOldest(process.env.OLDEST_VERSIONS || ""),
 };
+
+// "game=x.y.z,game2=x.y.z" -> {game: "x.y.z"}; pairs without both halves are skipped.
+function parseOldest(text) {
+  const out = {};
+  for (const pair of text.split(",")) {
+    const [game, ver] = pair.split("=").map((x) => (x || "").trim());
+    if (game && ver) out[game] = ver;
+  }
+  return out;
+}
+
+// Versions by number, part by part ("0.5.10" after "0.5.9"), as the games compare them
+// (arcade-racer BootTree.compare): a leading "v" dropped, a missing or non-number part 0.
+function compareVersions(a, b) {
+  const x = String(a).replace(/^v/, "").split(".");
+  const y = String(b).replace(/^v/, "").split(".");
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const p = parseInt(x[i], 10) || 0;
+    const q = parseInt(y[i], 10) || 0;
+    if (p !== q) return p > q ? 1 : -1;
+  }
+  return 0;
+}
 
 function createRelay(options = {}) {
   const o = { ...DEFAULTS, ...options };
@@ -233,6 +264,12 @@ function createRelay(options = {}) {
     ws.close(1008, reason);
   }
 
+  // The room and welcome name the oldest version taken, when the game has one.
+  function withOldest(msg, game) {
+    if (o.oldest[game]) msg.oldest = o.oldest[game];
+    return msg;
+  }
+
   function newCode(game) {
     for (let tries = 0; tries < 100; tries++) {
       let code = "";
@@ -254,11 +291,21 @@ function createRelay(options = {}) {
     const ver = (url.searchParams.get("ver") || "").slice(0, 32);
     if (connections > o.maxConnections) return refuse(ws, "SERVER FULL");
     if (!(game in GAMES)) return refuse(ws, "NO SUCH GAME");
-    if (role === "host") return openRoom(ws, game, ver, ip);
+    // A game that sends no version is let in: only a version known to be old is refused.
+    const oldest = o.oldest[game] || "";
+    if (oldest && ver && compareVersions(ver, oldest) < 0) return refuse(ws, "OLD VERSION");
+    if (role === "host") {
+      const asked = parseInt(url.searchParams.get("guests") || "", 10);
+      const size = Number.isFinite(asked) ? Math.min(Math.max(asked, 1), GAMES[game])
+        : (ROOM_DEFAULT[game] ?? GAMES[game]);
+      return openRoom(ws, game, ver, ip, size);
+    }
     joinRoom(ws, game, (url.searchParams.get("code") || "").toUpperCase(), ver, ip);
   }
 
-  function openRoom(ws, game, ver, ip) {
+  function openRoom(ws, game, ver, ip, size) {
+    ws.rateScale = 1 + Math.min(size, 3);      // its messages go out once per guest
+    ws.bucket.tokens = o.ratePerSec * ws.rateScale;
     const now = Date.now();
     const times = (opened.get(ip) || []).filter((t) => now - t < 60 * 1000);
     if (times.length >= o.roomsPerMinute) return refuse(ws, "TOO MANY ROOMS");
@@ -266,12 +313,12 @@ function createRelay(options = {}) {
     opened.set(ip, times);
     const code = newCode(game);
     if (!code) return refuse(ws, "SERVER FULL");
-    const room = { key: game + "/" + code, game, code, ver, host: ws, guests: new Array(GAMES[game]).fill(null),
+    const room = { key: game + "/" + code, game, code, ver, host: ws, guests: new Array(size).fill(null),
                    page: null, born: now, last: now };
     rooms.set(room.key, room);
     stats.rooms++;
     o.log(`room open ${game} (rooms ${rooms.size}, connections ${connections})`);
-    send(ws, { op: "room", code });
+    send(ws, withOldest({ op: "room", code }, game));
 
     ws.on("message", (data, binary) => {
       if (!allowed(ws)) return;
@@ -312,7 +359,7 @@ function createRelay(options = {}) {
     room.guests[you] = ws;
     room.last = Date.now();
     stats.joins++;
-    send(ws, { op: "welcome", you, ver: room.ver });
+    send(ws, withOldest({ op: "welcome", you, ver: room.ver }, game));
     send(room.host, { op: "joined", guest: you, ver });
 
     ws.on("message", (data, binary) => {
@@ -345,7 +392,8 @@ function createRelay(options = {}) {
   function allowed(ws) {
     const now = Date.now();
     const b = ws.bucket;
-    b.tokens = Math.min(o.ratePerSec, b.tokens + ((now - b.at) / 1000) * o.ratePerSec);
+    const rate = o.ratePerSec * (ws.rateScale || 1);   // a room's host speaks for its guests
+    b.tokens = Math.min(rate, b.tokens + ((now - b.at) / 1000) * rate);
     b.at = now;
     if (b.tokens < 1) {
       refuse(ws, "TOO FAST");
@@ -394,7 +442,7 @@ function createRelay(options = {}) {
   };
 }
 
-module.exports = { createRelay, GAMES, ALPHABET, ALL };
+module.exports = { createRelay, compareVersions, parseOldest, GAMES, ALPHABET, ALL };
 
 if (require.main === module) {
   const relay = createRelay();

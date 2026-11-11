@@ -4,7 +4,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const WebSocket = require("ws");
-const { createRelay, ALPHABET, ALL } = require("../server");
+const { createRelay, compareVersions, parseOldest, ALPHABET, ALL } = require("../server");
 
 async function start(t, options = {}) {
   const relay = createRelay({ log: () => {}, ...options });
@@ -115,6 +115,81 @@ test("a Sundown Run room holds four players, and the host hears each guest apart
   // A racer's code is no port's
   assert.deepEqual((await join(url, code)).msg, { op: "error", reason: "NO SUCH ROOM" });
   h.close();
+});
+
+test("a port host sizes its room (doubles and watchers), up to the game's most", async (t) => {
+  const { url } = await start(t);
+  const h = client(`${url}/v1/host?game=pb94-port&ver=1.0.0&guests=7`);
+  const { code } = await h.next();
+  const guests = [];
+  for (let i = 0; i < 7; i++) guests.push(await join(url, code));
+  assert.ok(guests.every((g) => g.msg.op === "welcome"), "seven guests in");
+  assert.deepEqual((await join(url, code)).msg, { op: "error", reason: "ROOM FULL" });
+  const big = client(`${url}/v1/host?game=pb94-port&ver=1.0.0&guests=99`);
+  const room = (await big.next()).code;
+  for (let i = 0; i < 7; i++) await join(url, room);
+  assert.deepEqual((await join(url, room)).msg, { op: "error", reason: "ROOM FULL" }, "capped at the game's 7");
+  // the host of a big room may send for each of its guests: 4x the rate
+  const burst = [];
+  for (let i = 0; i < 500; i++) burst.push(Buffer.from([0, i & 0xff]));
+  for (const b of burst) h.send(b);
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(h.readyState, h.OPEN, "500 at once from a big room's host is allowed");
+  for (const g of guests) g.g.close();
+  h.close();
+  big.close();
+});
+
+test("versions compare by number, and OLDEST_VERSIONS reads as game=version pairs", () => {
+  assert.equal(compareVersions("0.5.10", "0.5.9"), 1);
+  assert.equal(compareVersions("0.5.2", "0.6.0"), -1);
+  assert.equal(compareVersions("v0.6", "0.6.0"), 0);
+  assert.deepEqual(parseOldest(""), {});
+  assert.deepEqual(parseOldest("sundown-run=0.6.0, pb94-port = 0.43.0,junk,=1.0"),
+                   { "sundown-run": "0.6.0", "pb94-port": "0.43.0" });
+});
+
+test("an older version is refused with OLD VERSION, host or guest (arcade-racer ON-14)", async (t) => {
+  const { url, relay } = await start(t, { oldest: { "sundown-run": "0.6.0" } });
+  const oldHost = client(`${url}/v1/host?game=sundown-run&ver=0.5.9`);
+  assert.deepEqual(await oldHost.next(), { op: "error", reason: "OLD VERSION" });
+  assert.equal(await oldHost.closed, 1008);
+  const { h, code } = await host(url, "sundown-run", "0.6.0");
+  const old = await join(url, code, "sundown-run", "0.5.10");
+  assert.deepEqual(old.msg, { op: "error", reason: "OLD VERSION" });
+  assert.equal(relay.stats.joins, 0, "the old guest took no seat");
+  // Another game keeps taking every version.
+  const port = await host(url, "pb94-port", "0.0.1");
+  port.h.close();
+  h.close();
+});
+
+test("the oldest version or newer is in, and the room and welcome name the oldest", async (t) => {
+  const { url } = await start(t, { oldest: { "sundown-run": "0.6.0" } });
+  const h = client(`${url}/v1/host?game=sundown-run&ver=0.6.0`);
+  const room = await h.next();
+  assert.deepEqual(room, { op: "room", code: room.code, oldest: "0.6.0" });
+  const { g, msg } = await join(url, room.code, "sundown-run", "0.6.10");
+  assert.deepEqual(msg, { op: "welcome", you: 0, ver: "0.6.0", oldest: "0.6.0" });
+  assert.deepEqual(await h.next(), { op: "joined", guest: 0, ver: "0.6.10" });
+  g.close();
+  h.close();
+});
+
+test("a game that sends no version is let in, an oldest set or not", async (t) => {
+  const { url } = await start(t, { oldest: { "sundown-run": "0.6.0" } });
+  const h = client(`${url}/v1/host?game=sundown-run`);
+  const room = await h.next();
+  assert.equal(room.op, "room");
+  const g = client(`${url}/v1/join?game=sundown-run&code=${room.code}`);
+  assert.deepEqual(await g.next(), { op: "welcome", you: 0, ver: "", oldest: "0.6.0" });
+  g.close();
+  h.close();
+  // With no oldest at all (the default), nothing changes: no "oldest" field, any version in.
+  const plain = await start(t);
+  const p = await host(plain.url, "sundown-run", "0.0.1");
+  assert.deepEqual((await join(plain.url, p.code, "sundown-run", "0.0.1")).msg, { op: "welcome", you: 0, ver: "0.0.1" });
+  p.h.close();
 });
 
 test("a full room, a wrong code and a wrong game are refused", async (t) => {
