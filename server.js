@@ -10,6 +10,7 @@
 //   GET /c/BXKM                                      -> the page that room's host sent
 //   GET /                                            -> a box for the room code, to /c/<code>
 //   GET|POST /v1/board?game=pb94-port&board=trip-YYYYMMDD -> a day's or a week's scores (boards.js)
+//   POST /v1/replay?game=pb94-port, GET ...&code=BXKMQT   -> a rally shared as a code (replays.js)
 //
 // Binary frames carry the games' messages. The host's have a one-byte
 // header both ways: the guest's number, or 255 for "all" (host to guests).
@@ -20,6 +21,7 @@
 const http = require("http");
 const { WebSocketServer } = require("ws");
 const { createBoards } = require("./boards");
+const { createReplays } = require("./replays");
 
 // Four letters, consonants only: no I or O to misread, and no vowels, so no words.
 const ALPHABET = "BCDFGHJKLMNPQRSTVWXZ";
@@ -77,6 +79,7 @@ const DEFAULTS = {
   sweepMs: 30 * 1000,
   log: console.log,
   boardFile: process.env.BOARD_FILE || "",   // boards kept across sleeps, if set
+  replayFile: process.env.REPLAY_FILE || "", // replay codes kept across sleeps, if set
   // The oldest version each game takes, {game: "x.y.z"}; a game not named takes any. From
   // OLDEST_VERSIONS="sundown-run=0.6.0,pb94-port=0.43.0". None by default: every build in.
   oldest: parseOldest(process.env.OLDEST_VERSIONS || ""),
@@ -113,6 +116,46 @@ function createRelay(options = {}) {
   let connections = 0;
   const stats = { rooms: 0, joins: 0, messages: 0, scores: 0 };
   const boards = createBoards({ file: o.boardFile });
+  const replays = createReplays({ file: o.replayFile });
+
+  // Replay codes (replays.js), for any page, as the boards are.
+  function replayRequest(req, res, url) {
+    const cors = { "access-control-allow-origin": "*", "access-control-allow-methods": "GET, POST, OPTIONS",
+                   "access-control-allow-headers": "content-type", "cache-control": "no-store" };
+    const reply = (code, body) => {
+      res.writeHead(code, { "content-type": "application/json", ...cors });
+      res.end(JSON.stringify(body));
+    };
+    if (req.method === "OPTIONS") {
+      res.writeHead(204, cors);
+      return res.end();
+    }
+    const game = url.searchParams.get("game") || "";
+    if (!(game in GAMES)) return reply(404, { error: "NO SUCH GAME" });
+    if (req.method === "GET") {
+      const r = replays.get(game, (url.searchParams.get("code") || "").toUpperCase());
+      return r ? reply(200, r) : reply(404, { error: "NO SUCH REPLAY" });
+    }
+    if (req.method !== "POST") return reply(405, { error: "GET OR POST" });
+    let body = "";
+    let big = false;
+    req.on("data", (chunk) => {
+      body += chunk;
+      if (body.length > 64 * 1024) {
+        big = true;
+        req.destroy();
+      }
+    });
+    req.on("end", () => {
+      if (big) return reply(413, { error: "TOO BIG" });
+      let parsed;
+      try { parsed = JSON.parse(body); } catch { return reply(400, { error: "BAD REPLAY" }); }
+      const out = replays.share(game, parsed, ipOf(req));
+      if (out.error) return reply(out.error === "TOO MANY TRIES" ? 429 : out.error === "TOO BIG" ? 413 : 400, out);
+      stats.replays = (stats.replays || 0) + 1;
+      reply(200, out);
+    });
+  }
 
   // The boards (boards.js), for any page: the Web build calls from its own origin.
   function boardRequest(req, res, url) {
@@ -157,6 +200,7 @@ function createRelay(options = {}) {
       return res.end(FRONT);
     }
     if (url.pathname === "/v1/board") return boardRequest(req, res, url);
+    if (url.pathname === "/v1/replay") return replayRequest(req, res, url);
     const page = url.pathname.match(/^\/c\/([A-Za-z]{4})\/?$/);
     if (page) {
       const ip = ipOf(req);
@@ -375,6 +419,7 @@ function createRelay(options = {}) {
       else if (now - room.born > o.capMs) closeRoom(room, "TIME UP");
     }
     boards.sweep();
+    replays.sweep();
     for (const map of [opened, missed]) {
       for (const [ip, times] of map) if (times.every((t) => now - t > 60 * 1000)) map.delete(ip);
     }

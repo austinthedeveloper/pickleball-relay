@@ -395,3 +395,45 @@ test("BOARD_FILE keeps boards across a restart", async (t) => {
   const second = await start(t, { boardFile: file });
   assert.equal((await board(second.port, today())).body.board[0].score, 77);
 });
+
+// Replay codes (replays.js, port ADR-112)
+const { createReplays } = require("../replays");
+
+async function replay(port, method, body, code = "", headers = {}) {
+  const q = code ? `&code=${code}` : "";
+  const res = await fetch(`http://127.0.0.1:${port}/v1/replay?game=pb94-port${q}`, {
+    method, headers: { "content-type": "application/json", ...headers }, body: body && JSON.stringify(body),
+  });
+  return { status: res.status, body: await res.json(), headers: res.headers };
+}
+
+test("a replay shared gets a code, and the code gives it back to any page", async (t) => {
+  const { port } = await start(t);
+  const data = Buffer.from("PB94R a rally's inputs").toString("base64");
+  const r = await replay(port, "POST", { data });
+  assert.equal(r.status, 200);
+  assert.match(r.body.code, /^[BCDFGHJKLMNPQRSTVWXZ]{6}$/);
+  assert.equal(r.body.days, 7);
+  assert.equal(r.headers.get("access-control-allow-origin"), "*");
+  const back = await replay(port, "GET", null, r.body.code.toLowerCase());
+  assert.deepEqual(back.body, { data }, "the same bytes, and only them");
+  const none = await replay(port, "GET", null, "BBBBBB");
+  assert.deepEqual([none.status, none.body.error], [404, "NO SUCH REPLAY"]);
+});
+
+test("replay codes refuse what they shouldn't keep, and keep 7 days", async (t) => {
+  const { port } = await start(t);
+  assert.equal((await replay(port, "POST", { data: "not base64!" })).body.error, "BAD REPLAY");
+  assert.equal((await replay(port, "POST", { nothing: 1 })).body.error, "BAD REPLAY");
+  const big = await replay(port, "POST", { data: "A".repeat(49 * 1024) }, "", { "x-forwarded-for": "10.7.7.7" });
+  assert.equal(big.status, 413);
+  const store = createReplays({ perHour: 2 });
+  const now = Date.now();
+  const a = store.share("pb94-port", { data: "QUJD" }, "1.2.3.4", now);
+  assert.ok(store.get("pb94-port", a.code, now + 6 * 86400000), "kept for 6 days");
+  assert.equal(store.get("pb94-port", a.code, now + 8 * 86400000), null, "gone after 7");
+  store.share("pb94-port", { data: "QUJD" }, "1.2.3.4", now);
+  assert.equal(store.share("pb94-port", { data: "QUJD" }, "1.2.3.4", now).error, "TOO MANY TRIES");
+  store.sweep(now + 8 * 86400000);
+  assert.equal(store.size(), 0, "swept");
+});
