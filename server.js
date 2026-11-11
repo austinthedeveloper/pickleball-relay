@@ -52,8 +52,11 @@ function go() {
 }
 </script></main></body></html>`;
 
+// A room's guests when the host doesn't say (?guests=n, up to the game's
+// most): the port's games before rooms of seats asked for none, so one.
+const ROOM_DEFAULT = { "pb94-port": 1 };
 const GAMES = {
-  "pb94-port": 1,       // ONLINE: one guest
+  "pb94-port": 7,       // ONLINE: up to 3 more seats and 4 watchers (the host asks, ?guests=)
   "pb94-vr-coach": 8,   // coach phones
   "pb94-vr": 3,         // future VR online
   "sundown-run": 3,     // Sundown Run's online races: four players (arcade-racer ON-1)
@@ -210,11 +213,18 @@ function createRelay(options = {}) {
     const ver = (url.searchParams.get("ver") || "").slice(0, 32);
     if (connections > o.maxConnections) return refuse(ws, "SERVER FULL");
     if (!(game in GAMES)) return refuse(ws, "NO SUCH GAME");
-    if (role === "host") return openRoom(ws, game, ver, ip);
+    if (role === "host") {
+      const asked = parseInt(url.searchParams.get("guests") || "", 10);
+      const size = Number.isFinite(asked) ? Math.min(Math.max(asked, 1), GAMES[game])
+        : (ROOM_DEFAULT[game] ?? GAMES[game]);
+      return openRoom(ws, game, ver, ip, size);
+    }
     joinRoom(ws, game, (url.searchParams.get("code") || "").toUpperCase(), ver, ip);
   }
 
-  function openRoom(ws, game, ver, ip) {
+  function openRoom(ws, game, ver, ip, size) {
+    ws.rateScale = 1 + Math.min(size, 3);      // its messages go out once per guest
+    ws.bucket.tokens = o.ratePerSec * ws.rateScale;
     const now = Date.now();
     const times = (opened.get(ip) || []).filter((t) => now - t < 60 * 1000);
     if (times.length >= o.roomsPerMinute) return refuse(ws, "TOO MANY ROOMS");
@@ -222,7 +232,7 @@ function createRelay(options = {}) {
     opened.set(ip, times);
     const code = newCode(game);
     if (!code) return refuse(ws, "SERVER FULL");
-    const room = { key: game + "/" + code, game, code, ver, host: ws, guests: new Array(GAMES[game]).fill(null),
+    const room = { key: game + "/" + code, game, code, ver, host: ws, guests: new Array(size).fill(null),
                    page: null, born: now, last: now };
     rooms.set(room.key, room);
     stats.rooms++;
@@ -301,7 +311,8 @@ function createRelay(options = {}) {
   function allowed(ws) {
     const now = Date.now();
     const b = ws.bucket;
-    b.tokens = Math.min(o.ratePerSec, b.tokens + ((now - b.at) / 1000) * o.ratePerSec);
+    const rate = o.ratePerSec * (ws.rateScale || 1);   // a room's host speaks for its guests
+    b.tokens = Math.min(rate, b.tokens + ((now - b.at) / 1000) * rate);
     b.at = now;
     if (b.tokens < 1) {
       refuse(ws, "TOO FAST");
